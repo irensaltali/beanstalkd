@@ -1,10 +1,13 @@
-name: Testing clients
+name: Client Compatibility
 on:
-  - push
-  - pull_request
+  pull_request:
+  push:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   build:
-    name: Build beanstalkd
+    name: Build beanstalkd (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -17,12 +20,11 @@ jobs:
           name: beanstalkd-${{ matrix.runner }}
           path: beanstalkd
   pheanstalk:
-    name: Test Pheanstalk PHP
+    name: Pheanstalk (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
-    continue-on-error: true
     needs:
       - build
     steps:
@@ -47,9 +49,8 @@ jobs:
         env:
           SERVER_HOST: localhost
   greenstalk:
-    name: Test Greenstalk Python
+    name: Greenstalk (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    continue-on-error: true
     strategy:
       matrix:
         python-version: [ 3.9 ]
@@ -83,9 +84,8 @@ jobs:
           BEANSTALKD_PATH: ${{steps.download.outputs.download-path}}/beanstalkd
         run: make test
   pystalk:
-    name: Test Pystalk Python
+    name: Pystalk (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
-    continue-on-error: true
     strategy:
       matrix:
         python-version: [ "3.10" ]
