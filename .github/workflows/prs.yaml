@@ -1,18 +1,21 @@
 ---
-name: Checks for PRs
+name: Core PR Checks
 on:
   pull_request:
   push:
     branches-ignore:
       - master
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  tests:
-    name: Tests on ${{ matrix.runner }}
+  make-check:
+    name: make check (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v4
-      - name: Tests
+      - name: Run make check
         run: make check

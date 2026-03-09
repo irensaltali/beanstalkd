@@ -1,13 +1,16 @@
-[![Build Status](https://github.com/beanstalkd/beanstalkd/actions/workflows/build-latest.yaml/badge.svg)](https://github.com/beanstalkd/beanstalkd/actions/workflows/build-latest.yaml)
-[![codecov](https://codecov.io/gh/beanstalkd/beanstalkd/branch/master/graph/badge.svg)](https://codecov.io/gh/beanstalkd/beanstalkd)
+[![Core PR Checks](https://github.com/irensaltali/beanstalkd/actions/workflows/prs.yaml/badge.svg)](https://github.com/irensaltali/beanstalkd/actions/workflows/prs.yaml)
+[![Client Compatibility](https://github.com/irensaltali/beanstalkd/actions/workflows/test-clients.yaml/badge.svg)](https://github.com/irensaltali/beanstalkd/actions/workflows/test-clients.yaml)
 
 # beanstalkd
 
 Simple and fast general purpose work queue.
 
+This fork is actively maintained at
+https://github.com/irensaltali/beanstalkd.
+
 https://beanstalkd.github.io/
 
-See [doc/protocol.txt](https://github.com/beanstalkd/beanstalkd/blob/master/doc/protocol.txt)
+See [doc/protocol.txt](doc/protocol.txt)
 for details of the network protocol.
 
 Please note that this project is released with a Contributor
@@ -51,4 +54,3 @@ See http://github.com/rtomayko/ronn.
 
 Unit tests are in test*.c. See https://github.com/kr/ct for
 information on how to write them.
-
