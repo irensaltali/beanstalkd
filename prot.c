@@ -281,6 +281,7 @@ static const char * op_names[] = {
 
 static Job *remove_ready_job(Job *j);
 static Job *remove_buried_job(Job *j);
+static int restore_job(Job *j);
 
 // epollq_add schedules connection c in the s->conns heap, adds c
 // to the epollq list to change expected operation in event notifications.
@@ -479,6 +480,82 @@ process_queue()
     }
 }
 
+static int
+restore_ready_job(Job *j)
+{
+    int r = heapinsert(&j->tube->ready, j);
+    if (!r)
+        return 0;
+
+    ready_ct++;
+    if (j->r.pri < URGENT_THRESHOLD) {
+        global_stat.urgent_ct++;
+        j->tube->stat.urgent_ct++;
+    }
+    j->reserver = NULL;
+    j->r.state = Ready;
+    return 1;
+}
+
+static int
+restore_delayed_job(Job *j)
+{
+    int r = heapinsert(&j->tube->delay, j);
+    if (!r)
+        return 0;
+
+    j->reserver = NULL;
+    j->r.state = Delayed;
+    return 1;
+}
+
+static int
+buried_job_less(Job *a, Job *b)
+{
+    if (a->r.deadline_at < b->r.deadline_at)
+        return 1;
+    if (a->r.deadline_at > b->r.deadline_at)
+        return 0;
+    return a->r.id < b->r.id;
+}
+
+static void
+restore_buried_job(Job *j)
+{
+    Job *head = &j->tube->buried;
+    Job *pos = head->next;
+
+    while (pos != head && buried_job_less(pos, j)) {
+        pos = pos->next;
+    }
+
+    j->next = pos;
+    j->prev = pos->prev;
+    pos->prev->next = j;
+    pos->prev = j;
+
+    global_stat.buried_ct++;
+    j->tube->stat.buried_ct++;
+    j->reserver = NULL;
+    j->r.state = Buried;
+}
+
+static int
+restore_job(Job *j)
+{
+    switch (j->r.state) {
+    case Buried:
+        restore_buried_job(j);
+        return 1;
+    case Delayed:
+        return restore_delayed_job(j);
+    case Ready:
+        return restore_ready_job(j);
+    default:
+        return 0;
+    }
+}
+
 // soonest_delayed_job returns the delayed job
 // with the smallest deadline_at among all tubes.
 static Job *
@@ -553,6 +630,7 @@ bury_job(Server *s, Job *j, char update_store)
     job_list_insert(&j->tube->buried, j);
     global_stat.buried_ct++;
     j->tube->stat.buried_ct++;
+    j->r.deadline_at = nanoseconds();
     j->r.state = Buried;
     j->reserver = NULL;
     j->r.bury_ct++;
@@ -1558,9 +1636,7 @@ dispatch_cmd(Conn *c)
             return;
         }
 
-        /* We want to update the delay deadline on disk, so reserve space for
-         * that. */
-        if (delay) {
+        {
             int z = walresvupdate(&c->srv->wal);
             if (!z) {
                 reply_serr(c, MSG_OUT_OF_MEMORY);
@@ -1573,7 +1649,7 @@ dispatch_cmd(Conn *c)
         j->r.delay = delay;
         j->r.release_ct++;
 
-        r = enqueue_job(c->srv, j, delay, !!delay);
+        r = enqueue_job(c->srv, j, delay, 1);
         if (r < 0) {
             reply_serr(c, MSG_INTERNAL_ERROR);
             return;
@@ -2306,7 +2382,6 @@ int
 prot_replay(Server *s, Job *list)
 {
     Job *j, *nj;
-    int64 t;
     int r;
 
     for (j = list->next ; j != list ; j = nj) {
@@ -2317,23 +2392,17 @@ prot_replay(Server *s, Job *list)
             twarnx("failed to reserve space");
             return 0;
         }
-        int64 delay = 0;
-        switch (j->r.state) {
-        case Buried: {
-            bury_job(s, j, 0);
-            break;
+        j->walresv += z;
+        if (j->r.state == Delayed && nanoseconds() >= j->r.deadline_at) {
+            j->r.state = Ready;
         }
-        case Delayed:
-            t = nanoseconds();
-            if (t < j->r.deadline_at) {
-                delay = j->r.deadline_at - t;
-            }
-            /* Falls through */
-        default:
-            r = enqueue_job(s, j, delay, 0);
-            if (r < 1)
-                twarnx("error recovering job %"PRIu64, j->r.id);
+
+        r = restore_job(j);
+        if (r < 1) {
+            twarnx("error recovering job %"PRIu64, j->r.id);
+            return 0;
         }
     }
+    process_queue();
     return 1;
 }

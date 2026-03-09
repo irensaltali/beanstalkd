@@ -365,6 +365,25 @@ filesize(char *path)
     return s.st_size;
 }
 
+static int
+total_binlog_size(void)
+{
+    int i, total = 0;
+
+    for (i = 1; ; i++) {
+        char *path = fmtalloc("%s/binlog.%d", ctdir(), i);
+        if (!exist(path)) {
+            free(path);
+            break;
+        }
+
+        total += filesize(path);
+        free(path);
+    }
+
+    return total;
+}
+
 void
 cttest_unknown_command()
 {
@@ -720,7 +739,8 @@ cttest_job_size_max_plus_1()
     mustsend(fd, "put 0 0 0 1073741825\r\n");
 
     const int len = 1024*1024;
-    char body[len+1];
+    char *body = malloc(len + 1);
+    assert(body != NULL);
     memset(body, 'a', len);
     body[len] = 0;
 
@@ -731,6 +751,7 @@ cttest_job_size_max_plus_1()
     mustsend(fd, "x");
     mustsend(fd, "\r\n");
     ckresp(fd, "JOB_TOO_BIG\r\n");
+    free(body);
 }
 
 void
@@ -1681,6 +1702,122 @@ cttest_binlog_read()
     ckresp(fd, "DELETED\r\n");
     mustsend(fd, "delete 2\r\n");
     ckresp(fd, "NOT_FOUND\r\n");
+}
+
+void
+cttest_binlog_release_priority_restart()
+{
+    srv.wal.dir = ctdir();
+    srv.wal.use = 1;
+    srv.wal.syncrate = 0;
+    srv.wal.wantsync = 1;
+
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+    mustsend(fd, "put 0 0 100 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "put 10 0 100 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+
+    mustsend(fd, "reserve\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "A\r\n");
+    mustsend(fd, "release 1 20 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+
+    kill_srvpid();
+
+    port = SERVER();
+    fd = mustdiallocal(port);
+    mustsend(fd, "reserve\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+}
+
+void
+cttest_binlog_bury_restart_keeps_stats_and_order()
+{
+    srv.wal.dir = ctdir();
+    srv.wal.use = 1;
+    srv.wal.syncrate = 0;
+    srv.wal.wantsync = 1;
+
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+    mustsend(fd, "put 0 0 100 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "reserve\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "A\r\n");
+    mustsend(fd, "bury 1 0\r\n");
+    ckresp(fd, "BURIED\r\n");
+
+    mustsend(fd, "put 0 0 100 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+    mustsend(fd, "reserve\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+    mustsend(fd, "bury 2 0\r\n");
+    ckresp(fd, "BURIED\r\n");
+
+    kill_srvpid();
+
+    port = SERVER();
+    fd = mustdiallocal(port);
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nburies: 1\n");
+    mustsend(fd, "stats-job 2\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nburies: 1\n");
+
+    mustsend(fd, "peek-buried\r\n");
+    ckresp(fd, "FOUND 1 1\r\n");
+    ckresp(fd, "A\r\n");
+    mustsend(fd, "kick 1\r\n");
+    ckresp(fd, "KICKED 1\r\n");
+    mustsend(fd, "peek-buried\r\n");
+    ckresp(fd, "FOUND 2 1\r\n");
+    ckresp(fd, "B\r\n");
+}
+
+void
+cttest_binlog_release_delay_growth_bound()
+{
+    int i;
+
+    size = 512;
+    srv.wal.dir = ctdir();
+    srv.wal.use = 1;
+    srv.wal.filesize = size;
+    srv.wal.syncrate = 0;
+    srv.wal.wantsync = 1;
+
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+    mustsend(fd, "put 0 0 100 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+
+    for (i = 0; i < 200; i++) {
+        mustsend(fd, "reserve\r\n");
+        ckresp(fd, "RESERVED 1 1\r\n");
+        ckresp(fd, "A\r\n");
+        mustsend(fd, "release 1 0 1\r\n");
+        ckresp(fd, "RELEASED\r\n");
+        mustsend(fd, "kick-job 1\r\n");
+        ckresp(fd, "KICKED\r\n");
+    }
+
+    int total = total_binlog_size();
+    assertf(total <= (size * 4),
+            "binlog size kept growing: total=%d max=%d",
+            total,
+            size * 4);
 }
 
 void

@@ -207,6 +207,9 @@ job_copy(Job *j)
     job_list_reset(n);
 
     n->file = NULL; /* copies do not have refcnt on the wal */
+    n->state_file = NULL;
+    n->wal_body_bytes = 0;
+    n->wal_state_bytes = 0;
 
     n->tube = 0; /* Don't use memcpy for the tube, which we must refcount. */
     TUBE_ASSIGN(n->tube, j->tube);

@@ -17,6 +17,8 @@ static int  readrec5(File*, Job *, int*);
 static int  readfull(File*, void*, int, int*, char*);
 static void warnpos(File*, int, char*, ...)
 __attribute__((format(printf, 3, 4)));
+static void fileaddstate(File*, Job*, int);
+static void filermstate(Job*);
 
 FAlloc *falloc = &rawfalloc;
 
@@ -91,7 +93,7 @@ filedecref(File *f)
 
 
 void
-fileaddjob(File *f, Job *j)
+fileaddjob(File *f, Job *j, int body_bytes)
 {
     Job *h;
 
@@ -102,6 +104,7 @@ fileaddjob(File *f, Job *j)
     j->fnext = h;
     h->fprev->fnext = j;
     h->fprev = j;
+    j->wal_body_bytes = body_bytes;
     fileincref(f);
 }
 
@@ -116,8 +119,30 @@ filermjob(File *f, Job *j)
     j->fnext = 0;
     j->fprev = 0;
     j->file = NULL;
-    f->w->alive -= j->walused;
-    j->walused = 0;
+    f->w->alive -= j->wal_body_bytes;
+    j->wal_body_bytes = 0;
+    filedecref(f);
+}
+
+static void
+fileaddstate(File *f, Job *j, int state_bytes)
+{
+    j->state_file = f;
+    j->wal_state_bytes = state_bytes;
+    fileincref(f);
+}
+
+static void
+filermstate(Job *j)
+{
+    if (!j || !j->state_file)
+        return;
+
+    j->state_file->w->alive -= j->wal_state_bytes;
+    j->wal_state_bytes = 0;
+
+    File *f = j->state_file;
+    j->state_file = NULL;
     filedecref(f);
 }
 
@@ -156,7 +181,7 @@ fileread(File *f, Job *list)
 static int
 readrec(File *f, Job *l, int *err)
 {
-    int r, sz = 0;
+    int r;
     int namelen;
     Jobrec jr;
     Job *j;
@@ -173,7 +198,6 @@ readrec(File *f, Job *l, int *err)
     if (r != sizeof(int)) {
         return 0;
     }
-    sz += r;
     if (namelen >= MAX_TUBE_NAME_LEN) {
         warnpos(f, -r, "namelen %d exceeds maximum of %d", namelen, MAX_TUBE_NAME_LEN - 1);
         *err = 1;
@@ -191,7 +215,6 @@ readrec(File *f, Job *l, int *err)
         if (!r) {
             return 0;
         }
-        sz += r;
     }
     tubename[namelen] = '\0';
 
@@ -199,7 +222,6 @@ readrec(File *f, Job *l, int *err)
     if (!r) {
         return 0;
     }
-    sz += r;
 
     // are we reading trailing zeroes?
     if (!jr.id) return 0;
@@ -222,6 +244,10 @@ readrec(File *f, Job *l, int *err)
     case Ready:
     case Buried:
     case Delayed:
+        {
+            int state_bytes = sizeof(int) + sizeof(Jobrec);
+            int body_bytes = sizeof(int) + namelen + jr.body_size;
+
         if (!j) {
             if ((size_t)jr.body_size > job_data_size_limit) {
                 warnpos(f, -r, "job %"PRIu64" is too big (%"PRId32" > %zu)",
@@ -236,10 +262,6 @@ readrec(File *f, Job *l, int *err)
             job_list_reset(j);
             j->r.created_at = jr.created_at;
         }
-        j->r = jr;
-        job_list_insert(l, j);
-
-        // full record; read the job body
         if (namelen) {
             if (jr.body_size != j->r.body_size) {
                 warnpos(f, -r, "job %"PRIu64" size changed", j->r.id);
@@ -250,21 +272,27 @@ readrec(File *f, Job *l, int *err)
             if (!r) {
                 goto Error;
             }
-            sz += r;
-
-            // since this is a full record, we can move
-            // the file pointer and decref the old
-            // file, if any
-            filermjob(j->file, j);
-            fileaddjob(f, j);
         }
-        j->walused += sz;
-        f->w->alive += sz;
+
+        filermstate(j);
+        if (namelen) {
+            filermjob(j->file, j);
+            fileaddjob(f, j, body_bytes);
+            f->w->alive += body_bytes;
+            state_bytes = sizeof(Jobrec);
+        }
+
+        j->r = jr;
+        job_list_insert(l, j);
+        fileaddstate(f, j, state_bytes);
+        f->w->alive += state_bytes;
 
         return 1;
+        }
     case Invalid:
         if (j) {
             job_list_remove(j);
+            filermstate(j);
             filermjob(j->file, j);
             job_free(j);
         }
@@ -275,6 +303,7 @@ Error:
     *err = 1;
     if (j) {
         job_list_remove(j);
+        filermstate(j);
         filermjob(j->file, j);
         job_free(j);
     }
@@ -287,7 +316,7 @@ Error:
 static int
 readrec5(File *f, Job *l, int *err)
 {
-    int r, sz = 0;
+    int r;
     size_t namelen;
     Jobrec5 jr;
     Job *j;
@@ -304,7 +333,6 @@ readrec5(File *f, Job *l, int *err)
     if (r != sizeof(namelen)) {
         return 0;
     }
-    sz += r;
     if (namelen >= MAX_TUBE_NAME_LEN) {
         warnpos(f, -r, "namelen %zu exceeds maximum of %d", namelen, MAX_TUBE_NAME_LEN - 1);
         *err = 1;
@@ -316,7 +344,6 @@ readrec5(File *f, Job *l, int *err)
         if (!r) {
             return 0;
         }
-        sz += r;
     }
     tubename[namelen] = '\0';
 
@@ -324,7 +351,6 @@ readrec5(File *f, Job *l, int *err)
     if (!r) {
         return 0;
     }
-    sz += r;
 
     // are we reading trailing zeroes?
     if (!jr.id) return 0;
@@ -347,6 +373,10 @@ readrec5(File *f, Job *l, int *err)
     case Ready:
     case Buried:
     case Delayed:
+        {
+            int state_bytes = sizeof(size_t) + Jobrec5size;
+            int body_bytes = sizeof(size_t) + namelen + jr.body_size;
+
         if (!j) {
             if ((size_t)jr.body_size > job_data_size_limit) {
                 warnpos(f, -r, "job %"PRIu64" is too big (%"PRId32" > %zu)",
@@ -360,6 +390,26 @@ readrec5(File *f, Job *l, int *err)
                                  t, jr.id);
             job_list_reset(j);
         }
+        if (namelen) {
+            if (jr.body_size != j->r.body_size) {
+                warnpos(f, -r, "job %"PRIu64" size changed", j->r.id);
+                warnpos(f, -r, "was %"PRId32", now %"PRId32, j->r.body_size, jr.body_size);
+                goto Error;
+            }
+            r = readfull(f, j->body, j->r.body_size, err, "v5 job body");
+            if (!r) {
+                goto Error;
+            }
+        }
+
+        filermstate(j);
+        if (namelen) {
+            filermjob(j->file, j);
+            fileaddjob(f, j, body_bytes);
+            f->w->alive += body_bytes;
+            state_bytes = Jobrec5size;
+        }
+
         j->r.id = jr.id;
         j->r.pri = jr.pri;
         j->r.delay = jr.delay * 1000; // us => ns
@@ -374,33 +424,15 @@ readrec5(File *f, Job *l, int *err)
         j->r.kick_ct = jr.kick_ct;
         j->r.state = jr.state;
         job_list_insert(l, j);
-
-        // full record; read the job body
-        if (namelen) {
-            if (jr.body_size != j->r.body_size) {
-                warnpos(f, -r, "job %"PRIu64" size changed", j->r.id);
-                warnpos(f, -r, "was %"PRId32", now %"PRId32, j->r.body_size, jr.body_size);
-                goto Error;
-            }
-            r = readfull(f, j->body, j->r.body_size, err, "v5 job body");
-            if (!r) {
-                goto Error;
-            }
-            sz += r;
-
-            // since this is a full record, we can move
-            // the file pointer and decref the old
-            // file, if any
-            filermjob(j->file, j);
-            fileaddjob(f, j);
-        }
-        j->walused += sz;
-        f->w->alive += sz;
+        fileaddstate(f, j, state_bytes);
+        f->w->alive += state_bytes;
 
         return 1;
+        }
     case Invalid:
         if (j) {
             job_list_remove(j);
+            filermstate(j);
             filermjob(j->file, j);
             job_free(j);
         }
@@ -411,6 +443,7 @@ Error:
     *err = 1;
     if (j) {
         job_list_remove(j);
+        filermstate(j);
         filermjob(j->file, j);
         job_free(j);
     }
@@ -512,7 +545,6 @@ filewrite(File *f, Job *j, void *buf, int len)
     f->w->resv -= r;
     f->resv -= r;
     j->walresv -= r;
-    j->walused += r;
     f->w->alive += r;
     return 1;
 }
@@ -522,6 +554,7 @@ int
 filewrjobshort(File *f, Job *j)
 {
     int r, nl;
+    const int state_bytes = sizeof(int) + sizeof(Jobrec);
 
     nl = 0; // name len 0 indicates short record
     r = filewrite(f, j, &nl, sizeof nl) &&
@@ -529,9 +562,14 @@ filewrjobshort(File *f, Job *j)
     if (!r) return 0;
 
     if (j->r.state == Invalid) {
+        f->w->alive -= state_bytes;
+        filermstate(j);
         filermjob(j->file, j);
+        return r;
     }
 
+    filermstate(j);
+    fileaddstate(f, j, state_bytes);
     return r;
 }
 
@@ -540,14 +578,23 @@ int
 filewrjobfull(File *f, Job *j)
 {
     int nl;
+    int r;
+    int body_bytes;
 
-    fileaddjob(f, j);
     nl = strlen(j->tube->name);
-    return
+    body_bytes = sizeof(int) + nl + j->r.body_size;
+    r =
         filewrite(f, j, &nl, sizeof nl) &&
         filewrite(f, j, j->tube->name, nl) &&
         filewrite(f, j, &j->r, sizeof j->r) &&
         filewrite(f, j, j->body, j->r.body_size);
+    if (!r)
+        return 0;
+
+    filermstate(j);
+    fileaddjob(f, j, body_bytes);
+    fileaddstate(f, j, sizeof(Jobrec));
+    return 1;
 }
 
 

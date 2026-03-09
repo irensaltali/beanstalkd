@@ -210,6 +210,7 @@ struct Jobrec {
     // deadline_at is a timestamp, in nsec, that points to:
     // * time when job will become ready for delayed job,
     // * time when TTR is about to expire for reserved job,
+    // * time when the job was buried for buried job,
     // * undefined otherwise.
     int64  deadline_at;
 
@@ -231,12 +232,14 @@ struct Job {
     Job *prev, *next;           // linked list of jobs
     Job *ht_next;               // Next job in a hash table list
     size_t heap_index;          // where is this job in its current heap
-    File *file;
+    File *file;                 // file holding the current body snapshot
+    File *state_file;           // file holding the current state snapshot
     Job  *fnext;
     Job  *fprev;
     void *reserver;
     int walresv;
-    int walused;
+    int wal_body_bytes;
+    int wal_state_bytes;
 
     char *body;                 // written separately to the wal
 };
@@ -470,7 +473,7 @@ int  fileinit(File*, Wal*, int);
 Wal* fileadd(File*, Wal*);
 void fileincref(File*);
 void filedecref(File*);
-void fileaddjob(File*, Job*);
+void fileaddjob(File*, Job*, int);
 void filermjob(File*, Job*);
 int  fileread(File*, Job *list);
 void filewopen(File*);
